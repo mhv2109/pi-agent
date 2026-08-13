@@ -36,6 +36,8 @@
         "ast_grep_search": "allow",
         "ast_grep_replace": "ask",
         "module_report": "allow",
-        "read_symbol": "allow"
+        "read_symbol": "allow",
+        "web_search": "allow",
+        "fetch_content": "allow"
     }
 }

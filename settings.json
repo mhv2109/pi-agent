@@ -3,7 +3,8 @@
   "theme": "light",
   "packages": [
     "npm:@gotgenes/pi-permission-system",
-    "npm:pi-lens"
+    "npm:pi-lens",
+    "npm:pi-web-access"
   ],
   "defaultProvider": "openrouter",
   "defaultModel": "moonshotai/kimi-k3"
