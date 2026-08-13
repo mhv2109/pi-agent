@@ -1,0 +1,33 @@
+{
+    "permission": {
+        "read": "allow",
+        "find": "allow",
+        "ls": "allow",
+        "grep": "allow",
+        "bash": {
+            "cwd *": "allow",
+            "cat *": "allow",
+            "head *": "allow",
+            "tail *": "allow",
+            "dirname *": "allow",
+            "which *": "allow",
+            "basename *": "allow",
+            "file *": "allow",
+            "stat *": "allow",
+            "du *": "allow",
+            "df *": "allow",
+            "wc *": "allow",
+            "sort *": "allow",
+            "uniq *": "allow",
+            "rg *": "allow",
+            "date *": "allow",
+            "sleep *": "allow",
+            "whoami *": "allow",
+            "uname *": "allow",
+            "id *": "allow",
+            "ls *": "allow",
+            "grep *": "allow",
+            "find *": "allow"
+        }
+    }
+}
