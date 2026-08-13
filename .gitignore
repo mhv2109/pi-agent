@@ -1,0 +1,9 @@
+# Sensitive / auto-generated
+auth.json
+models-store.json
+
+# Binaries
+bin/
+
+# Runtime state
+sessions/
