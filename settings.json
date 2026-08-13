@@ -2,7 +2,8 @@
   "lastChangelogVersion": "0.84.1",
   "theme": "light",
   "packages": [
-    "npm:@gotgenes/pi-permission-system"
+    "npm:@gotgenes/pi-permission-system",
+    "npm:pi-lens"
   ],
   "defaultProvider": "openrouter",
   "defaultModel": "moonshotai/kimi-k3"

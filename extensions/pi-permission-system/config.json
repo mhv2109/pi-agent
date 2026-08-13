@@ -28,6 +28,14 @@
             "ls *": "allow",
             "grep *": "allow",
             "find *": "allow"
-        }
+        },
+        "project_report": "allow",
+        "lens_diagnostics": "allow",
+        "lsp_navigation": "allow",
+        "lsp_diagnostics": "allow",
+        "ast_grep_search": "allow",
+        "ast_grep_replace": "ask",
+        "module_report": "allow",
+        "read_symbol": "allow"
     }
 }
