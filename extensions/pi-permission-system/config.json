@@ -38,6 +38,8 @@
         "module_report": "allow",
         "read_symbol": "allow",
         "web_search": "allow",
-        "fetch_content": "allow"
+        "fetch_content": "allow",
+        "plan_mode_question": "allow",
+        "plan_mode_complete": "allow"
     }
 }

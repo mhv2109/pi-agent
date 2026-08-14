@@ -4,7 +4,8 @@
   "packages": [
     "npm:@gotgenes/pi-permission-system",
     "npm:pi-lens",
-    "npm:pi-web-access"
+    "npm:pi-web-access",
+    "npm:@narumitw/pi-plan-mode"
   ],
   "defaultProvider": "openrouter",
   "defaultModel": "moonshotai/kimi-k3"
