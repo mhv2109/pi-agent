@@ -8,5 +8,5 @@
     "npm:@narumitw/pi-plan-mode"
   ],
   "defaultProvider": "openrouter",
-  "defaultModel": "moonshotai/kimi-k3"
+  "defaultModel": "google/gemini-3.7-flash"
 }
