@@ -27,7 +27,8 @@
             "id *": "allow",
             "ls *": "allow",
             "grep *": "allow",
-            "find *": "allow"
+            "find *": "allow",
+            "pwd *": "allow"
         },
         "project_report": "allow",
         "lens_diagnostics": "allow",
