@@ -8,5 +8,6 @@
     "npm:@narumitw/pi-plan-mode"
   ],
   "defaultProvider": "openrouter",
-  "defaultModel": "google/gemini-3.7-flash"
+  "defaultModel": "google/gemini-3.7-flash",
+  "defaultThinkingLevel": "high"
 }
