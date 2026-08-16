@@ -5,8 +5,7 @@
     "npm:@gotgenes/pi-permission-system",
     "npm:pi-lens",
     "npm:pi-web-access",
-    "npm:@narumitw/pi-plan-mode",
-    "git:github.com/obra/superpowers"
+    "npm:@narumitw/pi-plan-mode"
   ],
   "defaultProvider": "openrouter",
   "defaultModel": "google/gemini-3.7-flash",
