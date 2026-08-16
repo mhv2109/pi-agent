@@ -7,3 +7,6 @@ bin/
 
 # Runtime state
 sessions/
+
+# Cloned packages
+git/
