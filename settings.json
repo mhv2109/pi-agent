@@ -9,6 +9,6 @@
     "git:github.com/obra/superpowers"
   ],
   "defaultProvider": "openrouter",
-  "defaultModel": "google/gemini-3.7-flash",
+  "defaultModel": "deepseek/deepseek-v4-flash-0731",
   "defaultThinkingLevel": "high"
 }
