@@ -1,11 +1,12 @@
 {
-  "lastChangelogVersion": "0.84.1",
+  "lastChangelogVersion": "0.84.2",
   "theme": "light",
   "packages": [
     "npm:@gotgenes/pi-permission-system",
     "npm:pi-lens",
     "npm:pi-web-access",
-    "npm:@narumitw/pi-plan-mode"
+    "npm:@narumitw/pi-plan-mode",
+    "git:github.com/obra/superpowers"
   ],
   "defaultProvider": "openrouter",
   "defaultModel": "google/gemini-3.7-flash",
