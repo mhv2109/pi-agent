@@ -88,6 +88,23 @@
         "web_search": "allow",
         "fetch_content": "allow",
         "plan_mode_question": "allow",
-        "plan_mode_complete": "allow"
+        "plan_mode_complete": "allow",
+        "skill": {
+            "*": "ask",
+            "brainstorming": "allow",
+            "dispatching-parallel-agents": "allow",
+            "executing-plans": "allow",
+            "finishing-a-development-branch": "allow",
+            "receiving-code-review": "allow",
+            "requesting-code-review": "allow",
+            "subagent-driven-development": "allow",
+            "systematic-debugging": "allow",
+            "test-driven-development": "allow",
+            "using-git-worktrees": "allow",
+            "using-superpowers": "allow",
+            "verification-before-completion": "allow",
+            "writing-plans": "allow",
+            "writing-skills": "allow"
+        }
     }
 }
