@@ -1,5 +1,5 @@
 {
-  "lastChangelogVersion": "0.84.2",
+  "lastChangelogVersion": "0.84.4",
   "theme": "light",
   "packages": [
     "npm:@gotgenes/pi-permission-system",
@@ -9,6 +9,7 @@
     "git:github.com/obra/superpowers"
   ],
   "defaultProvider": "openrouter",
-  "defaultModel": "deepseek/deepseek-v4-flash-0731",
-  "defaultThinkingLevel": "high"
+  "defaultModel": "z-ai/glm-5.3-flash",
+  "defaultThinkingLevel": "high",
+  "hideThinkingBlock": true
 }
