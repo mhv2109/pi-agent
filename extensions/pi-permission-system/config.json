@@ -308,7 +308,8 @@
             "git whatchanged *": "allow",
             "git verify-pack *": "allow",
             "git cherry *": "allow",
-            "git apply --check *": "allow"
+            "git apply --check *": "allow",
+            "echo *": "allow"
         },
         "project_report": "allow",
         "lens_diagnostics": "allow",
