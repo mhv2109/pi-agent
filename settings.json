@@ -6,7 +6,6 @@
     "npm:pi-lens",
     "npm:pi-web-access",
     "npm:@narumitw/pi-plan-mode",
-    "git:github.com/obra/superpowers",
     "https://github.com/ayghri/i-have-adhd"
   ],
   "defaultProvider": "openrouter",
