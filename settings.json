@@ -11,5 +11,16 @@
   "defaultProvider": "openrouter",
   "defaultModel": "z-ai/glm-5.3-flash",
   "defaultThinkingLevel": "high",
-  "hideThinkingBlock": true
+  "hideThinkingBlock": true,
+  "defaultPlanTools": [
+    "read",
+    "bash",
+    "grep",
+    "find",
+    "ls",
+    "web_search",
+    "source_check",
+    "fetch_content",
+    "get_search_content"
+  ]
 }

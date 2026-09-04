@@ -347,7 +347,9 @@
         "module_report": "allow",
         "read_symbol": "allow",
         "web_search": "allow",
+        "source_check": "allow",
         "fetch_content": "allow",
+        "get_search_content": "allow",
         "plan_mode_question": "allow",
         "plan_mode_complete": "allow",
         "skill": {
