@@ -10,7 +10,17 @@
             "*.env.*": "ask",
             "~/.ssh/*": "deny",
             "~/.aws/*": "deny",
-            "*.pem": "deny"
+            "~/.kube/*": "deny",
+            "~/.gnupg/*": "deny",
+            "*.pem": "deny",
+            "*.key": "deny",
+            "secrets/*": "deny",
+            "*/secrets/*": "deny",
+            "credentials/*": "deny",
+            "*/credentials/*": "deny",
+            "~/.claude/.credentials.json": "deny",
+            "~/.pi/agent/auth.json": "deny",
+            "~/.pi/agent/models-store.json": "deny"
         },
         "read": "allow",
         "find": "allow",
