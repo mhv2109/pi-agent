@@ -4,6 +4,11 @@
             "*": "ask",
             "~/.agents/*": "allow"
         },
+        "external_directory_read": {
+            "*": "allow"
+        },
+        "write": "allow",
+        "edit": "allow",
         "path": {
             "*": "allow",
             "*.env": "ask",
