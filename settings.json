@@ -1,5 +1,5 @@
 {
-  "lastChangelogVersion": "0.84.4",
+  "lastChangelogVersion": "0.85.1",
   "theme": "light",
   "packages": [
     "npm:@gotgenes/pi-permission-system",
@@ -11,16 +11,5 @@
   "defaultProvider": "openrouter",
   "defaultModel": "z-ai/glm-5.3-flash",
   "defaultThinkingLevel": "high",
-  "hideThinkingBlock": true,
-  "defaultPlanTools": [
-    "read",
-    "bash",
-    "grep",
-    "find",
-    "ls",
-    "web_search",
-    "source_check",
-    "fetch_content",
-    "get_search_content"
-  ]
+  "hideThinkingBlock": true
 }

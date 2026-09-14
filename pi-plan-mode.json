@@ -1,0 +1,13 @@
+{
+  "defaultPlanTools": [
+    "read",
+    "bash",
+    "grep",
+    "find",
+    "ls",
+    "web_search",
+    "source_check",
+    "fetch_content",
+    "get_search_content"
+  ]
+}
