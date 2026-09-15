@@ -22,13 +22,31 @@
  * Usage:
  *   /docker            # new interactive container session
  *   /docker <args>     # extra args for the container's pi (e.g. -p "prompt")
+ *   /docker rebuild    # reset tool state: remove the tools volume and
+ *                      # rebuild the sandbox image (--no-cache supported)
  *
  * Image `pi-sandbox:<host-pi-version>` is built on first use from a
  * generated Dockerfile cached at ~/.pi/agent/docker/Dockerfile, and
  * rebuilt automatically whenever the host pi version changes.
+ *
+ * Tool persistence: a named engine volume `pi-docker-tools-<cwd-hash>`
+ * (hash = first 10 hex chars of sha256 of the project cwd) is mounted at
+ * /usr, so packages installed inside container sessions (apt-get, npm i -g,
+ * tarball installs, manual builds) survive across sessions. Docker/Podman
+ * auto-creates the volume on first use by copying the image's /usr into it
+ * (copy-up — the first launch after a reset is slower, one-time). The
+ * volume therefore pins /usr content: after upgrading pi or node, the
+ * container keeps the volume's old /usr (including the old node) until you
+ * run `/docker rebuild`, which removes the tools volume and rebuilds the
+ * sandbox image; the next launch re-copies /usr from the fresh image.
+ * Set PI_DOCKER_TOOLS_VOLUME=<name> to share one volume across projects
+ * deliberately, or PI_DOCKER_TOOLS_VOLUME=off to disable the mount
+ * (fully ephemeral sessions, as before). The writable container layer is
+ * still discarded by --rm; only /usr persists.
  */
 
 import { spawnSync, execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { join } from "node:path";
@@ -173,6 +191,32 @@ function ensureDockerfile(version: string): string {
 
 function imageTag(version: string): string {
 	return `${IMAGE_PREFIX}:${version}`;
+}
+
+/**
+ * Name of the engine volume mounted at /usr for tools persistence, derived
+ * per project cwd. Env overrides:
+ *   - PI_DOCKER_TOOLS_VOLUME=<name>  use this exact volume name (e.g. to
+ *     share one volume across projects deliberately)
+ *   - PI_DOCKER_TOOLS_VOLUME=off|none  disable the mount entirely
+ *     (fully ephemeral sessions)
+ * Returns null when disabled.
+ */
+export function toolsVolumeName(cwd: string): string | null {
+	const override = process.env.PI_DOCKER_TOOLS_VOLUME?.trim();
+	if (override) {
+		if (/^(off|none)$/i.test(override)) return null;
+		return override;
+	}
+	const hash = createHash("sha256").update(cwd).digest("hex").slice(0, 10);
+	return `pi-docker-tools-${hash}`;
+}
+
+function volumeExists(name: string): boolean {
+	return (
+		spawnSync("docker", ["volume", "inspect", name], { timeout: 10_000 })
+			.status === 0
+	);
 }
 
 function imageExists(tag: string): boolean {
@@ -344,9 +388,21 @@ export function buildRunArgs(opts: {
 	args: string[];
 	/** Host path of the filtered settings copy, when one was prepared. */
 	settingsOverlay?: string;
+	/** Engine volume mounted at /usr for tool persistence, when enabled. */
+	toolsVolume?: string;
 }): string[] {
-	const { version, uid, gid, rootlessPodman, homeDir, piHomeDir, cwd, args, settingsOverlay } =
-		opts;
+	const {
+		version,
+		uid,
+		gid,
+		rootlessPodman,
+		homeDir,
+		piHomeDir,
+		cwd,
+		args,
+		settingsOverlay,
+		toolsVolume,
+	} = opts;
 
 	const dockerArgs = ["run", "--rm", "-it"];
 
@@ -404,6 +460,14 @@ export function buildRunArgs(opts: {
 		);
 	}
 
+	// Tools-persistence volume at /usr: engine-managed (auto-created on first
+	// use by copy-up from the image), so no :Z label is needed — labels apply
+	// to bind mounts, not named volumes. `--rm` still discards the writable
+	// container layer; only /usr persists.
+	if (toolsVolume) {
+		dockerArgs.push("-v", `${toolsVolume}:/usr`);
+	}
+
 	dockerArgs.push("-w", cwd);
 	dockerArgs.push(imageTag(version));
 	dockerArgs.push("pi", ...args);
@@ -417,6 +481,88 @@ export function buildRunArgs(opts: {
 interface LaunchResult {
 	code: number | null;
 	error?: string;
+}
+
+interface RebuildResult {
+	ok: boolean;
+	error?: string;
+	note?: string;
+}
+
+/**
+ * Reset tool state: remove the project's tools volume (if any) and rebuild
+ * the sandbox image. Order matters — the image rebuild only happens after the
+ * volume removal succeeds, so a failure (e.g. volume in use) leaves nothing
+ * half-done.
+ */
+export function rebuild(cwd: string, noCache: boolean): RebuildResult {
+	// Same preflight as launch: docker CLI present + engine reachable.
+	const which = spawnSync("which", ["docker"], { encoding: "utf8" });
+	if (which.status !== 0 || !which.stdout.trim()) {
+		return {
+			ok: false,
+			error:
+				"`docker` CLI not found. Install Docker or the Podman docker compatibility layer (e.g. `podman-docker`).",
+		};
+	}
+	const engine = detectEngine();
+	if (!engine.ok) {
+		const backend = engine.name;
+		const hint = engine.podman
+			? `Is the ${backend} machine running? Try: podman machine start`
+			: `Is Docker running? Start Docker Desktop (or the docker daemon).`;
+		return {
+			ok: false,
+			error: `Container engine unreachable (${short(engine.error ?? "", 160)}). ${hint}`,
+		};
+	}
+
+	// 1. Remove the tools volume, when one is configured for this project.
+	const volume = toolsVolumeName(cwd);
+	let volumeRemoved: string | null = null;
+	if (volume && volumeExists(volume)) {
+		const rm = spawnSync("docker", ["volume", "rm", volume], {
+			encoding: "utf8",
+			timeout: 30_000,
+		});
+		if (rm.status !== 0) {
+			const detail = short((rm.stderr ?? rm.stdout ?? "").toString().trim(), 200);
+			return {
+				ok: false,
+				error: `Failed to remove tools volume ${volume} (exit ${rm.status ?? "?"}). ${detail} — is a container still using it? Reset aborted; nothing was rebuilt.`,
+			};
+		}
+		volumeRemoved = volume;
+	}
+
+	// 2. Rebuild the sandbox image (layer cache makes this cheap unless
+	// --no-cache was requested).
+	const version = hostPiVersion();
+	const tag = imageTag(version);
+	const dockerfile = ensureDockerfile(version);
+	console.error(
+		`docker-session: rebuilding image ${tag}${noCache ? " (--no-cache)" : ""}...`,
+	);
+	const buildArgs = ["build", "-t", tag, "-f", dockerfile];
+	if (noCache) buildArgs.push("--no-cache");
+	buildArgs.push(DOCKER_DIR);
+	const build = spawnSync("docker", buildArgs, { stdio: "inherit" });
+	if (build.status !== 0) {
+		return {
+			ok: false,
+			error: `Failed to build image ${tag} (exit ${build.status ?? "?"}). Build output above; fix the issue and retry /docker rebuild.`,
+		};
+	}
+
+	let note: string;
+	if (volumeRemoved) {
+		note = `reset: removed tools volume ${volumeRemoved}; rebuilt ${tag} — next launch re-copies /usr from the image (slower first launch, one-time)`;
+	} else if (volume) {
+		note = `reset: no tools volume to remove; rebuilt ${tag} — next launch re-copies /usr from the image (slower first launch, one-time)`;
+	} else {
+		note = `reset: tools volume disabled (PI_DOCKER_TOOLS_VOLUME=off) — rebuilt ${tag}`;
+	}
+	return { ok: true, note };
 }
 
 /** The whole launch (preflight + run) runs while the TUI is suspended. */
@@ -468,7 +614,17 @@ function launch(args: string[], cwd: string): LaunchResult {
 		}
 	}
 
-	// 4. Filter settings for the container (drops the permission system and
+	// 4. Tools-persistence volume: derived from cwd unless overridden/disabled
+	// via PI_DOCKER_TOOLS_VOLUME. The engine auto-creates it on first use; we
+	// just announce the one-time copy-up cost when it doesn't exist yet.
+	const toolsVolume = toolsVolumeName(cwd) ?? undefined;
+	if (toolsVolume && !volumeExists(toolsVolume)) {
+		console.error(
+			`docker-session: initializing tools volume ${toolsVolume} (first-run /usr copy-up, one-time)...`,
+		);
+	}
+
+	// 5. Filter settings for the container (drops the permission system and
 	// anything on PI_DOCKER_DROP_PACKAGES) and write the copy that gets
 	// bind-mounted over the shared settings.json inside the container. On
 	// failure (missing/unparseable settings) we fail open: launch proceeds
@@ -486,7 +642,7 @@ function launch(args: string[], cwd: string): LaunchResult {
 		);
 	}
 
-	// 5. Run the container with the host pi TUI in it.
+	// 6. Run the container with the host pi TUI in it.
 	const runArgs = buildRunArgs({
 		version,
 		uid,
@@ -497,6 +653,7 @@ function launch(args: string[], cwd: string): LaunchResult {
 		cwd,
 		args,
 		settingsOverlay: filtered ? join(DOCKER_DIR, "settings.json") : undefined,
+		toolsVolume,
 	});
 
 	console.error(`docker-session: starting container session (pi ${version})...`);
@@ -529,7 +686,50 @@ export default function (pi: ExtensionAPI) {
 			}
 
 			const cwd = ctx.cwd;
-			const extraArgs = (args ?? "").trim().length ? args.trim().split(/\s+/) : [];
+			const trimmed = (args ?? "").trim();
+			const tokens = trimmed.length ? trimmed.split(/\s+/) : [];
+
+			// /docker rebuild [--no-cache]: reset tool state (remove the tools
+			// volume) and rebuild the sandbox image. Anything else after
+			// "rebuild" is warned about and ignored.
+			if (tokens[0] === "rebuild") {
+				let noCache = false;
+				const ignored: string[] = [];
+				for (const token of tokens.slice(1)) {
+					if (token === "--no-cache") noCache = true;
+					else ignored.push(token);
+				}
+				if (ignored.length) {
+					ctx.ui.notify(
+						`/docker rebuild: ignoring unsupported arg(s): ${ignored.join(", ")}`,
+						"warning",
+					);
+				}
+
+				const result = await ctx.ui.custom<RebuildResult>(
+					(tui, _theme, _kb, done) => {
+						tui.stop();
+						process.stdout.write("\x1b[2J\x1b[H");
+
+						const res = rebuild(cwd, noCache);
+
+						tui.start();
+						tui.requestRender(true);
+						done(res);
+						return { render: () => [], invalidate: () => {} };
+					},
+				);
+				if (!result) return;
+				if (!result.ok) {
+					ctx.ui.notify(result.error ?? "Rebuild failed", "error");
+					return;
+				}
+				ctx.ui.notify(result.note ?? "Rebuild complete", "info");
+				return;
+			}
+
+			// Anything else is forwarded verbatim to the container's pi.
+			const extraArgs = tokens;
 
 			// Suspend the TUI, run the container synchronously with the
 			// terminal inherited, then restore the TUI.
