@@ -8,6 +8,13 @@
  *   - current project mounted at its same absolute path
  *   - host TUI suspends while the container runs, restored on exit
  *
+ * Permission-free container sessions: a filtered copy of the host
+ * settings.json (dropping packages matched by PI_DOCKER_DROP_PACKAGES,
+ * default `@gotgenes/pi-permission-system`) is written to
+ * ~/.pi/agent/docker/settings.json and bind-mounted over the shared
+ * settings.json inside the container only — tools run there with no
+ * approval prompts. The host permission system is untouched.
+ *
  * Works with both Docker and Podman (via its `docker` CLI compatibility
  * layer). Engine is probed at launch for accurate error messages only;
  * the command subset used is identical under both engines.
@@ -178,8 +185,155 @@ function short(s: string, n = 200): string {
 	return s.length > n ? s.slice(0, n) + "…" : s;
 }
 
+// ---------------------------------------------------------------------------
+// Settings filtering (permission-free container sessions)
+// ---------------------------------------------------------------------------
+
+/** Package-source substrings (case-insensitive) dropped from container settings. */
+const DEFAULT_DROP_PACKAGES = "@gotgenes/pi-permission-system";
+
+/**
+ * Strip // and /* *\/ comments outside of strings (defensive JSONC handling;
+ * settings.json is plain JSON today but this keeps the filter robust).
+ */
+function stripJsonComments(src: string): string {
+	let out = "";
+	let i = 0;
+	let inString = false;
+	while (i < src.length) {
+		const ch = src[i];
+		if (inString) {
+			out += ch;
+			if (ch === "\\") {
+				out += src[i + 1] ?? "";
+				i += 2;
+				continue;
+			}
+			if (ch === '"') inString = false;
+			i++;
+			continue;
+		}
+		if (ch === '"') {
+			inString = true;
+			out += ch;
+			i++;
+			continue;
+		}
+		if (ch === "/" && src[i + 1] === "/") {
+			while (i < src.length && src[i] !== "\n") i++;
+			continue;
+		}
+		if (ch === "/" && src[i + 1] === "*") {
+			i += 2;
+			while (i < src.length && !(src[i] === "*" && src[i + 1] === "/")) i++;
+			i += 2;
+			continue;
+		}
+		out += ch;
+		i++;
+	}
+	return out;
+}
+
+/** Drop patterns from env (comma-separated), defaulting to the permission system. */
+function dropPatterns(): string[] {
+	const raw = process.env.PI_DOCKER_DROP_PACKAGES ?? DEFAULT_DROP_PACKAGES;
+	return raw
+		.split(",")
+		.map((s) => s.trim().toLowerCase())
+		.filter(Boolean);
+}
+
+interface FilteredSettings {
+	/** Re-serialized settings JSON with dropped packages removed. */
+	json: string;
+	/** Package entries that were removed. */
+	dropped: string[];
+}
+
+/**
+ * Remove configured package entries from raw settings text.
+ * Returns null when the settings are missing, unparseable, lack a packages
+ * array, or nothing matched (in which case the host settings stay live in the
+ * container — no pointless shadow mount).
+ */
+export function filterSettings(raw: string): FilteredSettings | null {
+	const patterns = dropPatterns();
+	if (!patterns.length) return null;
+	let parsed: { packages?: unknown };
+	try {
+		parsed = JSON.parse(stripJsonComments(raw));
+	} catch {
+		return null;
+	}
+	if (!Array.isArray(parsed?.packages)) return null;
+	const packages = parsed.packages as unknown[];
+	const dropped: string[] = [];
+	const kept = packages.filter((entry) => {
+		const source = typeof entry === "string" ? entry : String(entry);
+		const hit = patterns.some((p) => source.toLowerCase().includes(p));
+		if (hit) dropped.push(source);
+		return !hit;
+	});
+	if (dropped.length === 0) return null;
+	parsed.packages = kept;
+	return { json: JSON.stringify(parsed, null, 2) + "\n", dropped };
+}
+
+/**
+ * Filter the host settings and write the container copy. Returns the filter
+ * result, or null when no overlay should be mounted: silently for the
+ * intentional no-match/opt-out path, and (after one status line) on real
+ * failures — the container then runs with unfiltered host settings (fail-open).
+ */
+export function prepareContainerSettings(
+	homeDir: string,
+): FilteredSettings | null {
+	try {
+		const hostSettings = join(homeDir, ".pi", "agent", "settings.json");
+		if (!existsSync(hostSettings)) {
+			console.error(
+				`docker-session: could not filter settings — permission system will load in container (${hostSettings} not found)`,
+			);
+			return null;
+		}
+		if (!dropPatterns().length) return null; // explicit opt-out: stay silent
+		const raw = readFileSync(hostSettings, "utf8");
+		const filtered = filterSettings(raw);
+		if (!filtered) {
+			// Distinguish genuine breakage from the silent no-match path.
+			let ok: boolean;
+			try {
+				ok = Array.isArray(JSON.parse(stripJsonComments(raw))?.packages);
+			} catch {
+				ok = false;
+			}
+			if (!ok) {
+				console.error(
+					`docker-session: could not filter settings — permission system will load in container (${hostSettings} unparseable)`,
+				);
+			}
+			return null;
+		}
+		// Written on every launch so the copy keeps tracking host settings
+		// changes (e.g. newly added packages). Lives inside the already-mounted
+		// ~/.pi, so the identical container path exists before the overlay mount.
+		mkdirSync(DOCKER_DIR, { recursive: true });
+		writeFileSync(join(DOCKER_DIR, "settings.json"), filtered.json);
+		return filtered;
+	} catch (err) {
+		console.error(
+			`docker-session: could not filter settings — permission system will load in container (${short(
+				String((err as Error)?.message ?? err),
+				120,
+			)})`,
+		);
+		return null;
+	}
+}
+
 /** Build the `docker run` argv for the container pi session. */
-function buildRunArgs(opts: {
+export function buildRunArgs(opts: {
 	version: string;
 	uid: number;
 	gid: number;
@@ -188,8 +342,10 @@ function buildRunArgs(opts: {
 	piHomeDir: string; // where ~/.pi appears inside the container
 	cwd: string;
 	args: string[];
+	/** Host path of the filtered settings copy, when one was prepared. */
+	settingsOverlay?: string;
 }): string[] {
-	const { version, uid, gid, rootlessPodman, homeDir, piHomeDir, cwd, args } =
+	const { version, uid, gid, rootlessPodman, homeDir, piHomeDir, cwd, args, settingsOverlay } =
 		opts;
 
 	const dockerArgs = ["run", "--rm", "-it"];
@@ -208,13 +364,19 @@ function buildRunArgs(opts: {
 	// Environment
 	dockerArgs.push("-e", `HOME=${piHomeDir}`);
 	dockerArgs.push("-e", `PI_IN_CONTAINER=1`);
+	// Pin the agent dir to the shared mount. pi defaults to ~/.pi/agent, which
+	// with HOME=<piHomeDir> would resolve to <piHomeDir>/.pi/agent — a fresh
+	// dir one level too deep — so set it explicitly and ignore any host value.
+	dockerArgs.push("-e", `PI_CODING_AGENT_DIR=${piHomeDir}/agent`);
 	if (process.env.TERM) dockerArgs.push("-e", "TERM");
 	// PI_* passthrough, except session pointers: the container must get its
-	// own new session, not append to the host's active one.
+	// own new session, not append to the host's active one, and except the
+	// agent dir, which points at the host path and doesn't exist in-container.
 	const skipEnv = new Set([
 		"PI_SESSION_FILE",
 		"PI_SESSION_ID",
 		"PI_IN_CONTAINER",
+		"PI_CODING_AGENT_DIR",
 	]);
 	for (const [key, value] of Object.entries(process.env)) {
 		if (key.startsWith("PI_") && value !== undefined && !skipEnv.has(key)) {
@@ -230,6 +392,17 @@ function buildRunArgs(opts: {
 	// hosts; Docker Desktop accepts and ignores the label).
 	dockerArgs.push("-v", `${cwd}:${cwd}:Z`);
 	dockerArgs.push("-v", `${homeDir}/.pi:${piHomeDir}:Z`);
+
+	// Single-file overlay shadowing the shared settings.json: drops configured
+	// packages (default: the permission system) inside the container only.
+	// Layered over the ~/.pi directory mount above; `:Z` on a single user-owned
+	// file is fine under Docker Desktop and rootless Podman alike.
+	if (settingsOverlay) {
+		dockerArgs.push(
+			"-v",
+			`${settingsOverlay}:${piHomeDir}/agent/settings.json:Z`,
+		);
+	}
 
 	dockerArgs.push("-w", cwd);
 	dockerArgs.push(imageTag(version));
@@ -295,13 +468,25 @@ function launch(args: string[], cwd: string): LaunchResult {
 		}
 	}
 
-	// 4. Run the container with the host pi TUI in it.
+	// 4. Filter settings for the container (drops the permission system and
+	// anything on PI_DOCKER_DROP_PACKAGES) and write the copy that gets
+	// bind-mounted over the shared settings.json inside the container. On
+	// failure (missing/unparseable settings) we fail open: launch proceeds
+	// without the overlay and the permission system loads as usual.
 	const uid = process.getuid?.() ?? 1000;
 	const gid = process.getgid?.() ?? 1000;
 	const isRoot = uid === 0;
 	const piHomeDir = isRoot ? "/root/.pi" : `/home/${CONTAINER_USER}/.pi`;
 	const homeDir = process.env.HOME ?? "/root";
 
+	const filtered = prepareContainerSettings(homeDir);
+	if (filtered) {
+		console.error(
+			`docker-session: container settings filtered — dropping: ${filtered.dropped.join(", ")}`,
+		);
+	}
+
+	// 5. Run the container with the host pi TUI in it.
 	const runArgs = buildRunArgs({
 		version,
 		uid,
@@ -311,6 +496,7 @@ function launch(args: string[], cwd: string): LaunchResult {
 		piHomeDir,
 		cwd,
 		args,
+		settingsOverlay: filtered ? join(DOCKER_DIR, "settings.json") : undefined,
 	});
 
 	console.error(`docker-session: starting container session (pi ${version})...`);

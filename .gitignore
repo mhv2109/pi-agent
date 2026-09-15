@@ -8,5 +8,8 @@ bin/
 # Runtime state
 sessions/
 
+# Generated container settings overlay (written on every docker session launch)
+docker/settings.json
+
 # Cloned packages
 git/
