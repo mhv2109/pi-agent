@@ -1,0 +1,382 @@
+/**
+ * Docker Session Extension
+ *
+ * Registers a `/docker` command that starts a new interactive pi session
+ * inside a container with full parity to the host:
+ *   - same settings, auth, npm packages, local extensions, skills
+ *   - same `~/.pi` absolute path (mounted read-write)
+ *   - current project mounted at its same absolute path
+ *   - host TUI suspends while the container runs, restored on exit
+ *
+ * Works with both Docker and Podman (via its `docker` CLI compatibility
+ * layer). Engine is probed at launch for accurate error messages only;
+ * the command subset used is identical under both engines.
+ *
+ * Usage:
+ *   /docker            # new interactive container session
+ *   /docker <args>     # extra args for the container's pi (e.g. -p "prompt")
+ *
+ * Image `pi-sandbox:<host-pi-version>` is built on first use from a
+ * generated Dockerfile cached at ~/.pi/agent/docker/Dockerfile, and
+ * rebuilt automatically whenever the host pi version changes.
+ */
+
+import { spawnSync, execFileSync } from "node:child_process";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { createRequire } from "node:module";
+import { join } from "node:path";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+
+// ---------------------------------------------------------------------------
+// Constants
+// ---------------------------------------------------------------------------
+
+const IMAGE_PREFIX = "pi-sandbox";
+const DOCKER_DIR = join(process.env.HOME ?? "/root", ".pi", "agent", "docker");
+const DOCKERFILE = join(DOCKER_DIR, "Dockerfile");
+
+const BASE_IMAGE = "node:24-bookworm-slim";
+const CONTAINER_USER = "node"; // standard non-root user in official node images
+
+/** Provider credential / config env vars to forward when present on the host. */
+const PROVIDER_ENV_VARS = [
+	"ANTHROPIC_API_KEY",
+	"ANTHROPIC_BASE_URL",
+	"ANTHROPIC_AUTH_TOKEN",
+	"OPENAI_API_KEY",
+	"OPENAI_BASE_URL",
+	"OPENROUTER_API_KEY",
+	"GOOGLE_API_KEY",
+	"GEMINI_API_KEY",
+	"GOOGLE_GENERATIVE_AI_API_KEY",
+	"XAI_API_KEY",
+	"GROQ_API_KEY",
+	"MISTRAL_API_KEY",
+	"DEEPSEEK_API_KEY",
+	"TOGETHER_API_KEY",
+	"FIREWORKS_API_KEY",
+	"AZURE_OPENAI_API_KEY",
+	"AZURE_API_KEY",
+	"AZURE_OPENAI_ENDPOINT",
+	"KIMI_API_KEY",
+	"MOONSHOT_API_KEY",
+	"ZAI_API_KEY",
+	"MINIMAX_API_KEY",
+	"COHERE_API_KEY",
+	"PERPLEXITY_API_KEY",
+	"OPENAI_SEARCH_API_KEY",
+	"BRAVE_API_KEY",
+	"TAVILY_API_KEY",
+	"EXA_API_KEY",
+	"KAGI_API_KEY",
+	"FIRECRAWL_API_KEY",
+	"SearXNG_URL",
+];
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+interface EngineInfo {
+	ok: boolean;
+	podman: boolean;
+	rootless: boolean;
+	name: string; // "Docker" | "Podman" | "docker"
+	error?: string;
+}
+
+/** Probe the container engine: reachable + which backend is behind `docker`. */
+function detectEngine(): EngineInfo {
+	const result = spawnSync("docker", ["info", "--format", "{{json .}}"], {
+		encoding: "utf8",
+		timeout: 15_000,
+	});
+	if (result.error || result.status !== 0) {
+		const stderr = (result.stderr ?? result.error?.message ?? "")
+			.toString()
+			.trim();
+		return {
+			ok: false,
+			podman: false,
+			rootless: false,
+			name: "docker",
+			error: stderr,
+		};
+	}
+	try {
+		const info = JSON.parse(result.stdout);
+		// Podman's info payload includes buildahVersion and host.security.rootless;
+		// Docker's does not.
+		const podman =
+			typeof info?.host?.buildahVersion === "string" ||
+			typeof info?.buildahVersion === "string";
+		const rootless = info?.host?.security?.rootless === true;
+		return { ok: true, podman, rootless, name: podman ? "Podman" : "Docker" };
+	} catch {
+		return { ok: true, podman: false, rootless: false, name: "docker" };
+	}
+}
+
+/** Host pi version, from the running install's package.json (fallback: `pi --version`). */
+function hostPiVersion(): string {
+	try {
+		// process.argv[1] is pi's CLI entry, so resolution is anchored to the
+		// installed package regardless of where the extension lives.
+		const anchor = process.argv[1] ?? process.execPath;
+		const req = createRequire(anchor);
+		const pkg = req("@earendil-works/pi-coding-agent/package.json") as {
+			version?: string;
+		};
+		if (pkg?.version) return pkg.version;
+	} catch {
+		// fall through
+	}
+	try {
+		return execFileSync("pi", ["--version"], { encoding: "utf8" }).trim();
+	} catch {
+		return "latest";
+	}
+}
+
+/** Generate (if needed) the Dockerfile used to build the sandbox image. */
+function ensureDockerfile(version: string): string {
+	const versionLine = `RUN npm install -g --ignore-scripts @earendil-works/pi-coding-agent@${version}`;
+	let existing = "";
+	if (existsSync(DOCKERFILE)) {
+		try {
+			existing = readFileSync(DOCKERFILE, "utf8");
+		} catch {
+			existing = "";
+		}
+	}
+	if (existing.includes(versionLine)) return DOCKERFILE;
+
+	const dockerfile = [
+		`FROM ${BASE_IMAGE}`,
+		"RUN apt-get update \\",
+		"  && apt-get install -y --no-install-recommends bash ca-certificates git ripgrep \\",
+		"  && rm -rf /var/lib/apt/lists/*",
+		versionLine,
+		"",
+	].join("\n");
+	mkdirSync(DOCKER_DIR, { recursive: true });
+	writeFileSync(DOCKERFILE, dockerfile);
+	return DOCKERFILE;
+}
+
+function imageTag(version: string): string {
+	return `${IMAGE_PREFIX}:${version}`;
+}
+
+function imageExists(tag: string): boolean {
+	const r = spawnSync("docker", ["image", "inspect", tag], { timeout: 10_000 });
+	return r.status === 0;
+}
+
+/** Truncate a string for inclusion in an error message. */
+function short(s: string, n = 200): string {
+	return s.length > n ? s.slice(0, n) + "…" : s;
+}
+
+/** Build the `docker run` argv for the container pi session. */
+function buildRunArgs(opts: {
+	version: string;
+	uid: number;
+	gid: number;
+	rootlessPodman: boolean;
+	homeDir: string; // host home (for the ~/.pi mount source)
+	piHomeDir: string; // where ~/.pi appears inside the container
+	cwd: string;
+	args: string[];
+}): string[] {
+	const { version, uid, gid, rootlessPodman, homeDir, piHomeDir, cwd, args } =
+		opts;
+
+	const dockerArgs = ["run", "--rm", "-it"];
+
+	// User mapping so files created inside the container are owned by the
+	// host user:
+	//   - Rootless Podman maps container root (0) to the host user, and
+	//     non-root container uids to subuid ranges (breaking file ownership
+	//     parity) — so run as container root there.
+	//   - Docker Desktop runs a root VM, so map the host uid/gid explicitly.
+	//   - Host root: skip mapping entirely, mount home at /root/.pi.
+	if (uid !== 0 && !rootlessPodman) {
+		dockerArgs.push("--user", `${uid}:${gid}`);
+	}
+
+	// Environment
+	dockerArgs.push("-e", `HOME=${piHomeDir}`);
+	dockerArgs.push("-e", `PI_IN_CONTAINER=1`);
+	if (process.env.TERM) dockerArgs.push("-e", "TERM");
+	// PI_* passthrough, except session pointers: the container must get its
+	// own new session, not append to the host's active one.
+	const skipEnv = new Set([
+		"PI_SESSION_FILE",
+		"PI_SESSION_ID",
+		"PI_IN_CONTAINER",
+	]);
+	for (const [key, value] of Object.entries(process.env)) {
+		if (key.startsWith("PI_") && value !== undefined && !skipEnv.has(key)) {
+			dockerArgs.push("-e", `${key}=${value}`);
+		}
+	}
+	for (const key of PROVIDER_ENV_VARS) {
+		const value = process.env[key];
+		if (value !== undefined) dockerArgs.push("-e", `${key}=${value}`);
+	}
+
+	// Bind mounts, always :Z-labeled (required by rootless Podman on SELinux
+	// hosts; Docker Desktop accepts and ignores the label).
+	dockerArgs.push("-v", `${cwd}:${cwd}:Z`);
+	dockerArgs.push("-v", `${homeDir}/.pi:${piHomeDir}:Z`);
+
+	dockerArgs.push("-w", cwd);
+	dockerArgs.push(imageTag(version));
+	dockerArgs.push("pi", ...args);
+	return dockerArgs;
+}
+
+// ---------------------------------------------------------------------------
+// Launch flow
+// ---------------------------------------------------------------------------
+
+interface LaunchResult {
+	code: number | null;
+	error?: string;
+}
+
+/** The whole launch (preflight + run) runs while the TUI is suspended. */
+function launch(args: string[], cwd: string): LaunchResult {
+	// 1. docker CLI present?
+	const which = spawnSync("which", ["docker"], { encoding: "utf8" });
+	if (which.status !== 0 || !which.stdout.trim()) {
+		return {
+			code: null,
+			error:
+				"`docker` CLI not found. Install Docker or the Podman docker compatibility layer (e.g. `podman-docker`).",
+		};
+	}
+
+	// 2. Engine reachable? (names the backend in errors)
+	const engine = detectEngine();
+	if (!engine.ok) {
+		const backend = engine.name;
+		const hint = engine.podman
+			? `Is the ${backend} machine running? Try: podman machine start`
+			: `Is Docker running? Start Docker Desktop (or the docker daemon).`;
+		return {
+			code: null,
+			error: `Container engine unreachable (${short(engine.error ?? "", 160)}). ${hint}`,
+		};
+	}
+	console.error(
+		`docker-session: backend detected: ${engine.name}${engine.rootless ? " (rootless)" : ""}`,
+	);
+
+	// 3. Image present for this host pi version? Build if not.
+	const version = hostPiVersion();
+	const tag = imageTag(version);
+	if (!imageExists(tag)) {
+		const dockerfile = ensureDockerfile(version);
+		console.error(
+			`docker-session: building image ${tag} (first run takes a minute)...`,
+		);
+		const build = spawnSync(
+			"docker",
+			["build", "-t", tag, "-f", dockerfile, DOCKER_DIR],
+			{ stdio: "inherit" },
+		);
+		if (build.status !== 0) {
+			return {
+				code: null,
+				error: `Failed to build image ${tag} (exit ${build.status ?? "?"}). Build output above; fix the issue and retry /docker.`,
+			};
+		}
+	}
+
+	// 4. Run the container with the host pi TUI in it.
+	const uid = process.getuid?.() ?? 1000;
+	const gid = process.getgid?.() ?? 1000;
+	const isRoot = uid === 0;
+	const piHomeDir = isRoot ? "/root/.pi" : `/home/${CONTAINER_USER}/.pi`;
+	const homeDir = process.env.HOME ?? "/root";
+
+	const runArgs = buildRunArgs({
+		version,
+		uid,
+		gid,
+		rootlessPodman: engine.rootless,
+		homeDir,
+		piHomeDir,
+		cwd,
+		args,
+	});
+
+	console.error(`docker-session: starting container session (pi ${version})...`);
+	const run = spawnSync("docker", runArgs, {
+		stdio: "inherit",
+		env: process.env,
+	});
+	return { code: run.status };
+}
+
+// ---------------------------------------------------------------------------
+// Extension
+// ---------------------------------------------------------------------------
+
+export default function (pi: ExtensionAPI) {
+	pi.registerCommand("docker", {
+		description:
+			"Start a new pi session inside a container (same settings, packages, auth, and project path). Extra args are passed to the container's pi.",
+		handler: async (args, ctx) => {
+			if (ctx.mode !== "tui") {
+				ctx.ui.notify("/docker requires an interactive TUI session", "warning");
+				return;
+			}
+			if (process.env.PI_IN_CONTAINER) {
+				ctx.ui.notify(
+					"Already inside a container session (/docker cannot nest)",
+					"warning",
+				);
+				return;
+			}
+
+			const cwd = ctx.cwd;
+			const extraArgs = (args ?? "").trim().length ? args.trim().split(/\s+/) : [];
+
+			// Suspend the TUI, run the container synchronously with the
+			// terminal inherited, then restore the TUI.
+			const result = await ctx.ui.custom<LaunchResult>(
+				(tui, _theme, _kb, done) => {
+					tui.stop();
+					process.stdout.write("\x1b[2J\x1b[H");
+
+					const res = launch(extraArgs, cwd);
+
+					tui.start();
+					tui.requestRender(true);
+					done(res);
+					return { render: () => [], invalidate: () => {} };
+				},
+			);
+
+			if (!result) return;
+			if (result.error) {
+				ctx.ui.notify(result.error, "error");
+				return;
+			}
+			const code = result.code;
+			if (code === 0) {
+				ctx.ui.notify("Container pi session exited cleanly (0)", "info");
+			} else if (code === null || code === undefined) {
+				ctx.ui.notify("Container pi session terminated", "warning");
+			} else {
+				ctx.ui.notify(
+					`Container pi session exited with code ${code}`,
+					code === 130 ? "info" : "warning",
+				);
+			}
+		},
+	});
+}
