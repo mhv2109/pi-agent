@@ -5,8 +5,8 @@
     "npm:@gotgenes/pi-permission-system",
     "npm:pi-lens",
     "npm:pi-web-access",
-    "npm:@narumitw/pi-plan-mode",
-    "https://github.com/ayghri/i-have-adhd"
+    "https://github.com/ayghri/i-have-adhd",
+    "git:github.com/obra/superpowers"
   ],
   "defaultProvider": "openrouter",
   "defaultModel": "z-ai/glm-5.3-flash",
