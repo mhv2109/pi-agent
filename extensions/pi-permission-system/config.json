@@ -2,7 +2,9 @@
     "permission": {
         "external_directory": {
             "*": "ask",
-            "~/.agents/*": "allow"
+            "~/.agents/*": "allow",
+            "/tmp": "allow",
+            "/tmp/*": "allow"
         },
         "external_directory_read": {
             "*": "allow"
@@ -11,6 +13,8 @@
         "edit": "allow",
         "path": {
             "*": "allow",
+            "/tmp": "allow",
+            "/tmp/*": "allow",
             "*.env": "ask",
             "*.env.*": "ask",
             "~/.ssh/*": "deny",
