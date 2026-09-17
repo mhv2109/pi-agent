@@ -6,7 +6,8 @@
     "npm:pi-lens",
     "npm:pi-web-access",
     "https://github.com/ayghri/i-have-adhd",
-    "git:github.com/obra/superpowers"
+    "git:github.com/obra/superpowers",
+    "npm:@gotgenes/pi-subagents"
   ],
   "defaultProvider": "openrouter",
   "defaultModel": "z-ai/glm-5.3-flash",
